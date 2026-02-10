@@ -1,0 +1,13 @@
+/target
+config.toml
+/logs
+/workspace
+/参考代码
+
+# Local reference files
+CLAUDE.md
+references/
+
+# Legacy config files
+ecosystem.config.js
+settings.example.json
