@@ -30,8 +30,18 @@ fn read_pid() -> Option<u32> {
 }
 
 /// Check if a process is alive.
+#[cfg(unix)]
 fn is_running(pid: u32) -> bool {
     unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
+#[cfg(windows)]
+fn is_running(pid: u32) -> bool {
+    std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {}", pid), "/NH"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
+        .unwrap_or(false)
 }
 
 /// Stop the running daemon via HTTP RPC, with PID+SIGTERM fallback.
@@ -52,8 +62,15 @@ pub fn stop_daemon() -> Result<()> {
         remove_pid_file();
         bail!("Process {pid} is not running (stale PID file removed)");
     }
+    #[cfg(unix)]
     unsafe {
         libc::kill(pid as i32, libc::SIGTERM);
+    }
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string()])
+            .output();
     }
     remove_pid_file();
     println!("Stopped myagent (PID {pid})");
