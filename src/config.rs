@@ -26,10 +26,14 @@ pub fn log_dir() -> PathBuf {
     config_dir().join("logs")
 }
 
+pub const DEFAULT_PORT: u16 = 17890;
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AppConfig {
     #[serde(default = "default_version")]
     pub version: u32,
+    #[serde(default = "default_port")]
+    pub port: u16,
     #[serde(default)]
     pub workspace: Option<String>,
     #[serde(default = "default_agent")]
@@ -75,8 +79,24 @@ pub struct ClaudeEnv {
 fn default_version() -> u32 {
     1
 }
+fn default_port() -> u16 {
+    DEFAULT_PORT
+}
 fn default_agent() -> String {
     "myagent".to_string()
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            version: default_version(),
+            port: default_port(),
+            workspace: None,
+            default_agent: default_agent(),
+            agents: HashMap::new(),
+            channels: ChannelsConfig::default(),
+        }
+    }
 }
 
 impl AppConfig {
@@ -123,6 +143,41 @@ impl AppConfig {
                 .to_string_lossy()
                 .to_string()
         })
+    }
+
+    /// Set an agent env value.
+    pub fn set_agent_env(&mut self, agent: &str, key: &str, value: &str) {
+        self.agents
+            .entry(agent.to_string())
+            .or_insert_with(|| AgentConfig {
+                env: HashMap::new(),
+            })
+            .env
+            .insert(key.to_string(), value.to_string());
+    }
+
+    /// Override config values with environment variables.
+    /// Priority: env var > config file.
+    pub fn with_env_overrides(mut self) -> Self {
+        let env_mappings = [
+            ("myagent", "MYAGENT_API_KEY"),
+            ("myagent", "MYAGENT_BASE_URL"),
+            ("myagent", "MYAGENT_MODEL"),
+            ("claude", "ANTHROPIC_BASE_URL"),
+            ("claude", "ANTHROPIC_API_KEY"),
+            ("claude", "ANTHROPIC_AUTH_TOKEN"),
+        ];
+        for (agent, key) in env_mappings {
+            if let Ok(v) = std::env::var(key) {
+                self.set_agent_env(agent, key, &v);
+            }
+        }
+        self
+    }
+
+    /// Check if required env vars are set for at least one agent.
+    pub fn has_required_env_vars() -> bool {
+        std::env::var("MYAGENT_API_KEY").is_ok()
     }
 }
 

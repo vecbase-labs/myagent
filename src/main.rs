@@ -5,6 +5,7 @@ mod cmd_init;
 mod config;
 mod daemon;
 mod frontend;
+mod health;
 mod protocol;
 mod thread;
 mod thread_manager;
@@ -42,16 +43,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start the daemon (Feishu channel + agent manager)
-    Serve {
-        /// Run as background daemon
-        #[arg(short, long)]
-        daemon: bool,
-    },
+    /// Start the daemon in background
+    Start,
     /// Stop the running daemon
     Stop,
     /// Show daemon status
     Status,
+    /// Restart the daemon (stop + start)
+    Restart,
+    /// Run the daemon in foreground (for development)
+    Serve,
     /// Interactive setup wizard
     Init,
     /// Manage configuration
@@ -86,7 +87,11 @@ async fn main() -> Result<()> {
     match &cli.command {
         Some(Commands::Stop) => return daemon::stop_daemon(),
         Some(Commands::Status) => return daemon::show_status(),
-        Some(Commands::Serve { daemon: true }) => return daemon::daemonize(),
+        Some(Commands::Start) => return daemon::daemonize(),
+        Some(Commands::Restart) => {
+            let _ = daemon::stop_daemon();
+            return daemon::daemonize();
+        }
         Some(Commands::Init) => return cmd_init::run(),
         Some(Commands::Config { action }) => {
             let path = cli.config.unwrap_or_else(config::default_config_path);
@@ -95,7 +100,7 @@ async fn main() -> Result<()> {
         _ => {}
     }
 
-    let is_serve = matches!(cli.command, Some(Commands::Serve { .. }));
+    let is_serve = matches!(cli.command, Some(Commands::Serve));
 
     // Init logging: CLI → stderr (warn), serve → stdout (info)
     if is_serve {
@@ -116,10 +121,24 @@ async fn main() -> Result<()> {
             .init();
     }
 
-    // Load config
+    // Load config (with auto-init and env var support)
     let config_path = cli.config.unwrap_or_else(config::default_config_path);
-    let config = config::AppConfig::load(&config_path)?;
-    info!("Config loaded from {:?}", config_path);
+    let config = if config_path.exists() {
+        config::AppConfig::load(&config_path)?.with_env_overrides()
+    } else if config::AppConfig::has_required_env_vars() {
+        // No config file but env vars are set — use defaults + env overrides
+        config::AppConfig::default().with_env_overrides()
+    } else {
+        // No config, no env vars — auto-run init wizard
+        eprintln!("No config found. Running setup wizard...\n");
+        cmd_init::run()?;
+        if config_path.exists() {
+            config::AppConfig::load(&config_path)?.with_env_overrides()
+        } else {
+            anyhow::bail!("Config not created. Run `myagent init` to set up.");
+        }
+    };
+    info!("Config loaded");
 
     // Resolve workspace: serve uses config value, CLI uses pwd
     let workspace = if is_serve {
@@ -135,6 +154,9 @@ async fn main() -> Result<()> {
     ));
 
     if is_serve {
+        // Start health server (also acts as single-instance guard)
+        let mut shutdown_rx = health::start_health_server(config.port).await?;
+
         daemon::write_pid_file()?;
         let feishu = config
             .feishu_config()
@@ -143,9 +165,19 @@ async fn main() -> Result<()> {
             })?
             .clone();
         let fe = frontend::feishu::FeishuFrontend::new(feishu);
-        let result = Box::new(fe).run(manager).await;
-        daemon::remove_pid_file();
-        result
+
+        // Run frontend until either it finishes or shutdown RPC is received
+        tokio::select! {
+            result = Box::new(fe).run(manager) => {
+                daemon::remove_pid_file();
+                result
+            }
+            _ = shutdown_rx.recv() => {
+                info!("Shutdown signal received via RPC");
+                daemon::remove_pid_file();
+                Ok(())
+            }
+        }
     } else {
         let agent_type = cli
             .agent

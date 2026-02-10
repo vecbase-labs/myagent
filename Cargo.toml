@@ -32,3 +32,4 @@ libc = "0.2"
 dirs = "6"
 ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
+axum = "0.8.8"
