@@ -10,19 +10,19 @@
 **macOS / Linux / WSL:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/vecbase-labs/myagent/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/vecbase-labs/myagent/main/scripts/install.sh | sh
 ```
 
 **Windows PowerShell:**
 
 ```powershell
-irm https://raw.githubusercontent.com/vecbase-labs/myagent/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/vecbase-labs/myagent/main/scripts/install.ps1 | iex
 ```
 
 **Windows CMD:**
 
 ```cmd
-curl -fsSL https://raw.githubusercontent.com/vecbase-labs/myagent/main/install.cmd -o install.cmd && install.cmd && del install.cmd
+curl -fsSL https://raw.githubusercontent.com/vecbase-labs/myagent/main/scripts/install.cmd -o install.cmd && install.cmd && del install.cmd
 ```
 
 ## Quick Start
