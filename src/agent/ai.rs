@@ -24,13 +24,18 @@ For Claude Code headless mode, use:\n\
 claude -p 'your prompt here' --output-format stream-json";
 
 const SYSTEM_PROMPT_FEISHU: &str = "\n\n\
-For Feishu file operations, use:\n\
-  myagent feishu files <chat_id>           -- list recent files in the chat\n\
-  myagent feishu files <chat_id> --page <token>  -- next page of files\n\
+For Feishu operations, use:\n\
+  myagent feishu send <id> -m <message>        -- send message (default: by chat_id)\n\
+  myagent feishu send <open_id> -m <msg> --id-type open_id  -- send to user by open_id\n\
+  myagent feishu reply <msg_id> -m <message>   -- reply to a specific message\n\
+  myagent feishu files <chat_id>               -- list recent files in a chat\n\
+  myagent feishu files <chat_id> --page <token> -- next page of files\n\
   myagent feishu download <file_key> --msg-id <message_id> -o <output_path>\n\
   myagent feishu upload <file_path> [-t <file_type>] [--chat-id <chat_id>]\n\
 When the user mentions a file, use `myagent feishu files` with the chat_id from the context \
-to find the file_key and message_id, then download it.";
+to find the file_key and message_id, then download it.\n\
+You can proactively send messages to notify the user of important results or task completion.\n\
+The chat_id is available in the <feishu_context> tag of each message.";
 
 const SYSTEM_PROMPT_TAIL: &str = "\n\n\
 Always explain what you're doing before executing commands. \

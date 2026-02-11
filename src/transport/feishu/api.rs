@@ -107,13 +107,23 @@ impl FeishuApi {
         msg_type: &str,
         content: &Value,
     ) -> Result<String> {
+        self.send_message_with_id_type(receive_id, msg_type, content, "chat_id").await
+    }
+
+    pub async fn send_message_with_id_type(
+        &self,
+        receive_id: &str,
+        msg_type: &str,
+        content: &Value,
+        receive_id_type: &str,
+    ) -> Result<String> {
         let token = self.get_token().await?;
         let body = serde_json::json!({
             "receive_id": receive_id,
             "msg_type": msg_type,
             "content": content.to_string(),
         });
-        let url = format!("{BASE_URL}/im/v1/messages?receive_id_type=chat_id");
+        let url = format!("{BASE_URL}/im/v1/messages?receive_id_type={receive_id_type}");
 
         let resp: SendMessageResponse = self
             .http

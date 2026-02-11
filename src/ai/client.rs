@@ -31,9 +31,10 @@ impl AnthropicClient {
     ) -> Result<mpsc::Receiver<StreamEvent>> {
         let (tx, rx) = mpsc::channel(256);
 
+        let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
         let is_anthropic = self.base_url.contains("anthropic.com");
 
-        let mut req = self.http.post(&self.base_url);
+        let mut req = self.http.post(&url);
         if is_anthropic {
             req = req
                 .header("x-api-key", &self.api_key)

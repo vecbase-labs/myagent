@@ -140,7 +140,13 @@ pub fn daemonize() -> Result<()> {
     fs::create_dir_all(&log_dir)?;
     let log_file = log_dir.join("myagent.log");
 
-    let log_out = fs::File::create(&log_file)?;
+    // Rotate log if it exceeds 10MB
+    rotate_log(&log_file, MAX_LOG_SIZE, MAX_LOG_FILES);
+
+    let log_out = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_file)?;
     let log_err = log_out.try_clone()?;
 
     let child = std::process::Command::new(exe)
@@ -207,4 +213,43 @@ fn http_post_rpc(port: u16, method: &str) -> Option<String> {
     let mut response = String::new();
     stream.read_to_string(&mut response).ok()?;
     response.split("\r\n\r\n").nth(1).map(|s| s.to_string())
+}
+
+// ── Log rotation ──
+
+const MAX_LOG_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
+const MAX_LOG_FILES: usize = 5;
+
+/// Rotate log file if it exceeds max_size.
+fn rotate_log(log_path: &std::path::Path, max_size: u64, max_files: usize) {
+    let size = fs::metadata(log_path).map(|m| m.len()).unwrap_or(0);
+    if size < max_size {
+        return;
+    }
+    for i in (1..max_files).rev() {
+        let from = log_path.with_extension(format!("log.{i}"));
+        let to = log_path.with_extension(format!("log.{}", i + 1));
+        let _ = fs::rename(&from, &to);
+    }
+    let _ = fs::rename(log_path, log_path.with_extension("log.1"));
+    let _ = fs::remove_file(log_path.with_extension(format!("log.{}", max_files + 1)));
+}
+
+/// Clear all log files.
+pub fn clear_logs() -> Result<()> {
+    let log_dir = config::log_dir();
+    if !log_dir.exists() {
+        println!("No logs to clear.");
+        return Ok(());
+    }
+    let mut count = 0;
+    for entry in fs::read_dir(&log_dir)? {
+        let entry = entry?;
+        if entry.file_name().to_string_lossy().starts_with("myagent.log") {
+            fs::remove_file(entry.path())?;
+            count += 1;
+        }
+    }
+    println!("Cleared {count} log file(s).");
+    Ok(())
 }

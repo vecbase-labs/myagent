@@ -14,11 +14,12 @@ use super::Agent;
 pub struct ClaudeAgent {
     config: ClaudeEnv,
     workspace: String,
+    has_feishu: bool,
 }
 
 impl ClaudeAgent {
-    pub fn new(config: ClaudeEnv, workspace: String) -> Self {
-        Self { config, workspace }
+    pub fn new(config: ClaudeEnv, workspace: String, has_feishu: bool) -> Self {
+        Self { config, workspace, has_feishu }
     }
 }
 
@@ -45,7 +46,7 @@ impl Agent for ClaudeAgent {
 
             emit(&tx_event, AgentEvent::StatusChange(AgentStatus::Working)).await;
 
-            match run_claude_process(&prompt, &self.config, &self.workspace, &tx_event).await {
+            match run_claude_process(&prompt, &self.config, &self.workspace, self.has_feishu, &tx_event).await {
                 Ok(()) => {
                     info!("Claude agent completed");
                     emit(
@@ -63,10 +64,25 @@ impl Agent for ClaudeAgent {
     }
 }
 
+const FEISHU_SYSTEM_PROMPT: &str = "\
+For Feishu operations, use:\n\
+  myagent feishu send <id> -m <message>        -- send message (default: by chat_id)\n\
+  myagent feishu send <open_id> -m <msg> --id-type open_id  -- send to user by open_id\n\
+  myagent feishu reply <msg_id> -m <message>   -- reply to a specific message\n\
+  myagent feishu files <chat_id>               -- list recent files in a chat\n\
+  myagent feishu files <chat_id> --page <token> -- next page of files\n\
+  myagent feishu download <file_key> --msg-id <message_id> -o <output_path>\n\
+  myagent feishu upload <file_path> [-t <file_type>] [--chat-id <chat_id>]\n\
+When the user mentions a file, use `myagent feishu files` with the chat_id from the context \
+to find the file_key and message_id, then download it.\n\
+You can proactively send messages to notify the user of important results or task completion.\n\
+The chat_id is available in the <feishu_context> tag of each message.";
+
 async fn run_claude_process(
     prompt: &str,
     config: &ClaudeEnv,
     workspace: &str,
+    has_feishu: bool,
     tx_event: &mpsc::Sender<AgentEvent>,
 ) -> Result<()> {
     let mut cmd = Command::new("claude");
@@ -81,6 +97,9 @@ async fn run_claude_process(
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true)
         .current_dir(workspace);
+    if has_feishu {
+        cmd.arg("--append-system-prompt").arg(FEISHU_SYSTEM_PROMPT);
+    }
     if let Some(base_url) = &config.base_url {
         cmd.env("ANTHROPIC_BASE_URL", base_url);
     }

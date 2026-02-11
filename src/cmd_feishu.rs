@@ -31,6 +31,25 @@ pub enum FeishuAction {
         #[arg(long)]
         msg_id: Option<String>,
     },
+    /// Send a text message to a Feishu chat or user
+    Send {
+        /// Receive ID (chat_id, open_id, or user_id depending on --id-type)
+        receive_id: String,
+        /// Message text to send
+        #[arg(short, long)]
+        message: String,
+        /// ID type: chat_id, open_id, user_id, union_id, email (default: chat_id)
+        #[arg(long, default_value = "chat_id")]
+        id_type: String,
+    },
+    /// Reply to a specific Feishu message
+    Reply {
+        /// Message ID to reply to
+        msg_id: String,
+        /// Reply text
+        #[arg(short, long)]
+        message: String,
+    },
     /// List file messages in a Feishu chat
     Files {
         /// Chat ID to list files from
@@ -88,6 +107,18 @@ pub async fn run(action: &FeishuAction) -> Result<()> {
             tokio::fs::write(&out_path, &bytes).await?;
             println!("{out_path}");
             eprintln!("Downloaded {} bytes", bytes.len());
+            Ok(())
+        }
+        FeishuAction::Send { receive_id, message, id_type } => {
+            let content = serde_json::json!({ "text": message });
+            let msg_id = api.send_message_with_id_type(receive_id, "text", &content, id_type).await?;
+            println!("{msg_id}");
+            Ok(())
+        }
+        FeishuAction::Reply { msg_id, message } => {
+            let content = serde_json::json!({ "text": message });
+            let reply_id = api.reply_message(msg_id, "text", &content).await?;
+            println!("{reply_id}");
             Ok(())
         }
         FeishuAction::Files {

@@ -35,6 +35,7 @@ impl ThreadManager {
             "claude" => Box::new(crate::agent::claude::ClaudeAgent::new(
                 self.config.claude_env(),
                 self.workspace.clone(),
+                self.config.feishu_config().is_some(),
             )),
             _ => Box::new(crate::agent::ai::AiAgent::new(
                 self.config.myagent_env(),

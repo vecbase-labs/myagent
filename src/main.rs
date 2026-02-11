@@ -70,6 +70,18 @@ enum Commands {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// Show daemon logs (tail -f)
+    Logs {
+        /// Number of lines to show (default: 50)
+        #[arg(short = 'n', long, default_value = "50")]
+        lines: usize,
+        /// Follow log output (like tail -f)
+        #[arg(short, long)]
+        follow: bool,
+        /// Clear all log files
+        #[arg(long)]
+        clear: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -108,6 +120,23 @@ async fn main() -> Result<()> {
         Some(Commands::Config { action }) => {
             let path = cli.config.unwrap_or_else(config::default_config_path);
             return cmd_config::run(action, &path);
+        }
+        Some(Commands::Logs { lines, follow, clear }) => {
+            if *clear {
+                return daemon::clear_logs();
+            }
+            let log_path = config::config_dir().join("logs").join("myagent.log");
+            if !log_path.exists() {
+                anyhow::bail!("Log file not found: {}", log_path.display());
+            }
+            let mut cmd = std::process::Command::new("tail");
+            cmd.arg("-n").arg(lines.to_string());
+            if *follow {
+                cmd.arg("-f");
+            }
+            cmd.arg(log_path);
+            let status = cmd.status()?;
+            std::process::exit(status.code().unwrap_or(1));
         }
         _ => {}
     }

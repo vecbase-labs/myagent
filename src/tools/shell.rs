@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use tokio::process::Command;
-use tracing::debug;
+use tracing::{debug, info};
 
 /// Maximum output size per stream (stdout/stderr) in bytes.
 const MAX_OUTPUT_BYTES: usize = 512 * 1024; // 512 KiB
@@ -136,6 +136,7 @@ pub async fn execute(
     work_dir: &str,
 ) -> Result<String> {
     debug!("Executing {} in {work_dir}: {command}", shell.shell_type.name());
+    info!("Shell: {}", truncate_str(command, 200));
 
     let args = shell.exec_args(command);
     let mut cmd = Command::new(&args[0]);
@@ -188,5 +189,17 @@ fn truncate_output(bytes: &[u8]) -> String {
         format!("{truncated}\n\n... (output truncated at {MAX_OUTPUT_BYTES} bytes)")
     } else {
         s.to_string()
+    }
+}
+
+fn truncate_str(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        s
+    } else {
+        let mut end = max;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        &s[..end]
     }
 }

@@ -79,25 +79,52 @@ impl InitApp {
                 active: false,
                 completed: false,
                 fields: vec![
+                    // 0: API Provider
                     Field {
-                        label: "MYAGENT_API_KEY".into(),
+                        label: "API Provider".into(),
+                        kind: FieldKind::Select {
+                            options: vec![
+                                "OpenRouter (Recommended)".into(),
+                                "Custom API (Claude Messages format only)".into(),
+                            ],
+                            selected: 0,
+                        },
+                        done: false,
+                    },
+                    // 1: API Key
+                    Field {
+                        label: "API Key".into(),
                         kind: FieldKind::Password {
                             value: String::new(),
                         },
                         done: false,
                     },
+                    // 2: Base URL (Custom API only)
                     Field {
-                        label: "MYAGENT_BASE_URL".into(),
+                        label: "Base URL (docs: platform.claude.com/docs/en/api/overview)".into(),
                         kind: FieldKind::Text {
                             value: String::new(),
-                            default: Some(
-                                "https://openrouter.ai/api/v1/messages".into(),
-                            ),
+                            default: None,
                         },
                         done: false,
                     },
+                    // 3: Model select (OpenRouter only)
                     Field {
-                        label: "MYAGENT_MODEL".into(),
+                        label: "Model".into(),
+                        kind: FieldKind::Select {
+                            options: vec![
+                                "moonshotai/kimi-k2.5".into(),
+                                "openrouter/pony-alpha".into(),
+                                "anthropic/claude-opus-4.6".into(),
+                                "Custom".into(),
+                            ],
+                            selected: 0,
+                        },
+                        done: false,
+                    },
+                    // 4: Custom model name
+                    Field {
+                        label: "Model name".into(),
                         kind: FieldKind::Text {
                             value: String::new(),
                             default: None,
@@ -203,10 +230,37 @@ impl InitApp {
         if let Some(w) = &cfg.workspace {
             self.set_field_value(0, 0, w);
         }
-        // MyAgent
-        self.set_field_value(1, 0, &me.api_key);
-        self.set_field_value(1, 1, &me.base_url);
-        self.set_field_value(1, 2, &me.model);
+        // MyAgent - detect provider from base_url
+        let is_openrouter = me.base_url.contains("openrouter.ai");
+        if !is_openrouter {
+            // Custom API: select provider=1
+            if let Some(FieldKind::Select { selected, .. }) =
+                self.sections.get_mut(1).and_then(|s| s.fields.get_mut(0)).map(|f| &mut f.kind)
+            {
+                *selected = 1;
+            }
+            self.set_field_value(1, 2, &me.base_url); // base_url field
+        }
+        self.set_field_value(1, 1, &me.api_key); // API key field
+        // Try to match model to preset options
+        let model_presets = ["moonshotai/kimi-k2.5", "openrouter/pony-alpha", "anthropic/claude-opus-4.6"];
+        if let Some(idx) = model_presets.iter().position(|m| *m == me.model) {
+            if let Some(FieldKind::Select { selected, .. }) =
+                self.sections.get_mut(1).and_then(|s| s.fields.get_mut(3)).map(|f| &mut f.kind)
+            {
+                *selected = idx;
+            }
+        } else {
+            // Custom model
+            if is_openrouter {
+                if let Some(FieldKind::Select { selected, .. }) =
+                    self.sections.get_mut(1).and_then(|s| s.fields.get_mut(3)).map(|f| &mut f.kind)
+                {
+                    *selected = 3; // Custom
+                }
+            }
+            self.set_field_value(1, 4, &me.model); // custom model name field
+        }
         // Claude
         if cl.base_url.is_some() || cl.auth_token.is_some() || cl.api_key.is_some() {
             // Pre-select "Configure"
@@ -310,6 +364,53 @@ impl InitApp {
             }
         }
 
+        // Handle MyAgent provider/model conditional flow
+        if self.sec_idx == 1 {
+            let provider = if let FieldKind::Select { selected, .. } = &sec.fields[0].kind {
+                *selected
+            } else {
+                0
+            };
+
+            match self.field_idx {
+                1 => {
+                    // After API key: OpenRouter → skip base_url (field 2), go to model select (field 3)
+                    //                 Custom → go to base_url (field 2)
+                    if provider == 0 {
+                        self.field_idx = 3; // skip to model select
+                        return;
+                    }
+                    // Custom: fall through to field 2
+                }
+                2 => {
+                    // After base_url (Custom API): skip model select (field 3), go to model name (field 4)
+                    self.field_idx = 4;
+                    return;
+                }
+                3 => {
+                    // After model select (OpenRouter): if preset model → done, if Custom → field 4
+                    if let FieldKind::Select { selected, .. } = &sec.fields[3].kind {
+                        if *selected < 3 {
+                            // Preset model selected, section done
+                            sec.completed = true;
+                            sec.active = false;
+                            self.next_section();
+                            return;
+                        }
+                    }
+                    // Custom model: fall through to field 4
+                }
+                4 => {
+                    // After custom model name: section done
+                    sec.completed = true;
+                    sec.active = false;
+                    self.next_section();
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         self.field_idx += 1;
         if self.field_idx >= sec.fields.len() {
             sec.completed = true;
@@ -392,9 +493,25 @@ impl InitApp {
 
     fn build_config(&self) -> serde_json::Value {
         let workspace = self.get_text(0, 0);
-        let api_key = self.get_text(1, 0);
-        let base_url = self.get_text(1, 1);
-        let model = self.get_text(1, 2);
+        let api_key = self.get_text(1, 1); // field 1: API key
+
+        // Determine provider, base_url, model
+        let provider = self.get_select(1, 0); // field 0: provider select
+        let (base_url, model) = if provider == 0 {
+            // OpenRouter
+            let model_sel = self.get_select(1, 3); // field 3: model select
+            let model = if model_sel == 3 {
+                // Custom model
+                self.get_text(1, 4)
+            } else {
+                let options = ["moonshotai/kimi-k2.5", "openrouter/pony-alpha", "anthropic/claude-opus-4.6"];
+                options[model_sel].to_string()
+            };
+            ("https://openrouter.ai/api".to_string(), model)
+        } else {
+            // Custom API
+            (self.get_text(1, 2), self.get_text(1, 4))
+        };
 
         let mut agents = serde_json::json!({
             "myagent": { "env": {
@@ -551,6 +668,10 @@ fn render(frame: &mut Frame, app: &InitApp) {
             }
             // Don't render fields for non-active, non-completed sections
             if !sec.active && !sec.completed {
+                continue;
+            }
+            // Skip fields that were never visited (conditional flow)
+            if sec.completed && !field.done {
                 continue;
             }
 
