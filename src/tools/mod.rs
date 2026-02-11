@@ -13,7 +13,7 @@ use shell::Shell;
 /// Whether a tool supports parallel execution (read lock).
 /// Tools that return `false` take an exclusive write lock.
 pub fn supports_parallel(name: &str) -> bool {
-    matches!(name, "shell" | "read_file" | "list_dir" | "grep_files")
+    matches!(name, "read_file" | "list_dir" | "grep_files")
 }
 
 /// Build all tool definitions for the AI loop.
@@ -85,7 +85,7 @@ pub fn build_tool_definitions(shell: &Shell) -> Vec<ToolDef> {
         ToolDef {
             name: "list_dir".to_string(),
             description: "List directory entries recursively with type indicators. \
-                Directories end with /, symlinks with @."
+                Directories end with /, symlinks with @. Supports pagination."
                 .to_string(),
             input_schema: json!({
                 "type": "object",
@@ -97,6 +97,14 @@ pub fn build_tool_definitions(shell: &Shell) -> Vec<ToolDef> {
                     "depth": {
                         "type": "integer",
                         "description": "Maximum traversal depth (default: 2)"
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "1-indexed start position for pagination (default: 1)"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum entries to return (default: 25)"
                     }
                 },
                 "required": ["dir_path"]
@@ -182,7 +190,9 @@ pub async fn execute_tool(
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("list_dir requires 'dir_path' string"))?;
             let depth = input["depth"].as_u64().unwrap_or(2) as usize;
-            list_dir::execute(dir_path, depth, work_dir).await
+            let offset = input["offset"].as_u64().unwrap_or(1) as usize;
+            let limit = input["limit"].as_u64().unwrap_or(25) as usize;
+            list_dir::execute(dir_path, depth, offset, limit, work_dir).await
         }
         "grep_files" => {
             let pattern = input["pattern"]

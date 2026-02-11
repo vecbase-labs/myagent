@@ -13,13 +13,13 @@ pub async fn execute(file_path: &str, offset: usize, limit: usize, work_dir: &st
     let limit = if limit == 0 { 2000 } else { limit };
 
     let path = if Path::new(file_path).is_absolute() {
-        file_path.to_string()
+        Path::new(file_path).to_path_buf()
     } else {
-        format!("{work_dir}/{file_path}")
+        Path::new(work_dir).join(file_path)
     };
 
     let file = File::open(&path).await
-        .map_err(|e| anyhow::anyhow!("Failed to read {path}: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("Failed to read {}: {e}", path.display()))?;
 
     let mut reader = BufReader::new(file);
     let mut collected = Vec::new();
@@ -29,7 +29,7 @@ pub async fn execute(file_path: &str, offset: usize, limit: usize, work_dir: &st
     loop {
         buf.clear();
         let bytes_read = reader.read_until(b'\n', &mut buf).await
-            .map_err(|e| anyhow::anyhow!("Failed to read {path}: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("Failed to read {}: {e}", path.display()))?;
 
         if bytes_read == 0 {
             break;

@@ -5,10 +5,11 @@ use anyhow::Result;
 use tokio::process::Command;
 
 const DEFAULT_LIMIT: usize = 100;
-const TIMEOUT_SECS: u64 = 30;
+const MAX_LIMIT: usize = 2000;
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Search files matching a regex pattern, returning file paths sorted by modification time.
-/// Uses ripgrep (rg) if available, falls back to grep.
+/// Uses ripgrep (rg) only — matches Codex behavior.
 pub async fn execute(
     pattern: &str,
     include: Option<&str>,
@@ -16,68 +17,66 @@ pub async fn execute(
     limit: usize,
     work_dir: &str,
 ) -> Result<String> {
-    let limit = if limit == 0 { DEFAULT_LIMIT } else { limit.min(2000) };
+    let pattern = pattern.trim();
+    if pattern.is_empty() {
+        return Err(anyhow::anyhow!("pattern must not be empty"));
+    }
+
+    let limit = if limit == 0 { DEFAULT_LIMIT } else { limit.min(MAX_LIMIT) };
 
     let dir = search_path.unwrap_or(work_dir);
     let path = if Path::new(dir).is_absolute() {
-        dir.to_string()
+        dir.into()
     } else {
-        format!("{work_dir}/{dir}")
+        Path::new(work_dir).join(dir)
     };
 
-    if !Path::new(&path).exists() {
-        return Err(anyhow::anyhow!("Path does not exist: {path}"));
+    if !path.exists() {
+        return Err(anyhow::anyhow!("unable to access `{}`: path does not exist", path.display()));
     }
 
-    // Try ripgrep first, then grep
-    let result = match try_ripgrep(pattern, include, &path, limit).await {
-        Ok(files) => Ok(files),
-        Err(_) => try_grep(pattern, include, &path, limit).await,
-    };
+    let include = include
+        .map(|s| s.trim())
+        .and_then(|s| if s.is_empty() { None } else { Some(s) });
 
-    match result {
-        Ok(files) if files.is_empty() => Ok("No matches found.".to_string()),
-        Ok(files) => Ok(files.join("\n")),
-        Err(e) => Err(e),
+    let results = run_rg_search(pattern, include, &path, limit, work_dir).await?;
+
+    if results.is_empty() {
+        Ok("No matches found.".to_string())
+    } else {
+        Ok(results.join("\n"))
     }
 }
 
-async fn try_ripgrep(
+async fn run_rg_search(
     pattern: &str,
     include: Option<&str>,
-    path: &str,
+    search_path: &Path,
     limit: usize,
+    cwd: &str,
 ) -> Result<Vec<String>> {
     let mut cmd = Command::new("rg");
-    cmd.arg("--files-with-matches")
+    cmd.current_dir(cwd)
+        .arg("--files-with-matches")
         .arg("--sortr=modified")
-        .arg("--max-count=1");
+        .arg("--regexp")
+        .arg(pattern)
+        .arg("--no-messages");
 
     if let Some(glob) = include {
         cmd.arg("--glob").arg(glob);
     }
 
-    cmd.arg(pattern).arg(path);
+    cmd.arg("--").arg(search_path);
 
-    let output = tokio::time::timeout(
-        Duration::from_secs(TIMEOUT_SECS),
-        cmd.output(),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("Search timed out after {TIMEOUT_SECS}s"))?
-    .map_err(|e| anyhow::anyhow!("Failed to run rg: {e}"))?;
+    let output = tokio::time::timeout(COMMAND_TIMEOUT, cmd.output())
+        .await
+        .map_err(|_| anyhow::anyhow!("rg timed out after 30 seconds"))?
+        .map_err(|e| anyhow::anyhow!("failed to launch rg: {e}. Ensure ripgrep is installed and on PATH."))?;
 
     match output.status.code() {
-        Some(0) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let files: Vec<String> = stdout
-                .lines()
-                .take(limit)
-                .map(|s| s.to_string())
-                .collect();
-            Ok(files)
-        }
-        Some(1) => Ok(Vec::new()), // No matches
+        Some(0) => Ok(parse_results(&output.stdout, limit)),
+        Some(1) => Ok(Vec::new()),
         _ => {
             let stderr = String::from_utf8_lossy(&output.stderr);
             Err(anyhow::anyhow!("rg failed: {stderr}"))
@@ -85,43 +84,21 @@ async fn try_ripgrep(
     }
 }
 
-async fn try_grep(
-    pattern: &str,
-    include: Option<&str>,
-    path: &str,
-    limit: usize,
-) -> Result<Vec<String>> {
-    let mut cmd = Command::new("grep");
-    cmd.arg("-rl");
-
-    if let Some(glob) = include {
-        cmd.arg("--include").arg(glob);
-    }
-
-    cmd.arg(pattern).arg(path);
-
-    let output = tokio::time::timeout(
-        Duration::from_secs(TIMEOUT_SECS),
-        cmd.output(),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("Search timed out after {TIMEOUT_SECS}s"))?
-    .map_err(|e| anyhow::anyhow!("Failed to run grep: {e}"))?;
-
-    match output.status.code() {
-        Some(0) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let files: Vec<String> = stdout
-                .lines()
-                .take(limit)
-                .map(|s| s.to_string())
-                .collect();
-            Ok(files)
+fn parse_results(stdout: &[u8], limit: usize) -> Vec<String> {
+    let mut results = Vec::new();
+    for line in stdout.split(|byte| *byte == b'\n') {
+        if line.is_empty() {
+            continue;
         }
-        Some(1) => Ok(Vec::new()),
-        _ => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(anyhow::anyhow!("grep failed: {stderr}"))
+        if let Ok(text) = std::str::from_utf8(line) {
+            if text.is_empty() {
+                continue;
+            }
+            results.push(text.to_string());
+            if results.len() == limit {
+                break;
+            }
         }
     }
+    results
 }

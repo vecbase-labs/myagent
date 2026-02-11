@@ -17,6 +17,7 @@ struct UpdateChunk {
     context: Option<String>,
     old_lines: Vec<String>,
     new_lines: Vec<String>,
+    is_end_of_file: bool,
 }
 
 /// Parse and apply a patch in Codex's custom format.
@@ -94,22 +95,24 @@ fn parse_patch(input: &str) -> Result<Vec<PatchHunk>> {
 
                     let mut old_lines = Vec::new();
                     let mut new_lines = Vec::new();
+                    let mut is_end_of_file = false;
 
                     while i < lines.len()
                         && !lines[i].starts_with("@@")
                         && !lines[i].starts_with("*** ")
                     {
                         let l = lines[i];
-                        if let Some(rest) = l.strip_prefix('-') {
+                        if l.trim() == "*** End of File" {
+                            is_end_of_file = true;
+                            i += 1;
+                            break;
+                        } else if let Some(rest) = l.strip_prefix('-') {
                             old_lines.push(rest.to_string());
                         } else if let Some(rest) = l.strip_prefix('+') {
                             new_lines.push(rest.to_string());
                         } else if let Some(rest) = l.strip_prefix(' ') {
                             old_lines.push(rest.to_string());
                             new_lines.push(rest.to_string());
-                        } else if l == "*** End of File" {
-                            i += 1;
-                            break;
                         } else {
                             // Context line without prefix (treat as context)
                             old_lines.push(l.to_string());
@@ -122,6 +125,7 @@ fn parse_patch(input: &str) -> Result<Vec<PatchHunk>> {
                         context,
                         old_lines,
                         new_lines,
+                        is_end_of_file,
                     });
                 } else {
                     i += 1;
@@ -144,7 +148,7 @@ fn parse_patch(input: &str) -> Result<Vec<PatchHunk>> {
     Ok(hunks)
 }
 
-// --- Applier ---
+// --- Applier (matches Codex logic) ---
 
 fn apply_hunks(hunks: &[PatchHunk], work_dir: &str) -> Result<String> {
     let mut summary = Vec::new();
@@ -174,45 +178,23 @@ fn apply_hunks(hunks: &[PatchHunk], work_dir: &str) -> Result<String> {
                 let content = std::fs::read_to_string(&full)
                     .map_err(|e| anyhow::anyhow!("Failed to read {path}: {e}"))?;
 
+                // Split by \n (not .lines()) to match Codex behavior
                 let mut file_lines: Vec<String> =
-                    content.lines().map(|l| l.to_string()).collect();
+                    content.split('\n').map(String::from).collect();
 
-                // Compute all replacements
-                let mut replacements: Vec<(usize, usize, Vec<String>)> = Vec::new();
-                let mut search_start = 0;
-
-                for chunk in chunks {
-                    // Find where to apply this chunk
-                    let start = if let Some(ctx) = &chunk.context {
-                        seek_context(&file_lines, ctx, search_start)?
-                    } else {
-                        search_start
-                    };
-
-                    let match_start =
-                        find_old_lines(&file_lines, &chunk.old_lines, start)?;
-
-                    replacements.push((
-                        match_start,
-                        chunk.old_lines.len(),
-                        chunk.new_lines.clone(),
-                    ));
-                    search_start = match_start + chunk.old_lines.len();
+                // Drop trailing empty element from final newline
+                if file_lines.last().is_some_and(String::is_empty) {
+                    file_lines.pop();
                 }
 
-                // Apply in reverse order
-                replacements.sort_by(|a, b| b.0.cmp(&a.0));
-                for (start, old_len, new_lines) in &replacements {
-                    let end = (*start + old_len).min(file_lines.len());
-                    file_lines.splice(*start..end, new_lines.iter().cloned());
-                }
+                let replacements = compute_replacements(&file_lines, path, chunks)?;
+                let mut new_lines = apply_replacements(file_lines, &replacements);
 
-                let new_content = file_lines.join("\n");
-                let new_content = if content.ends_with('\n') {
-                    format!("{new_content}\n")
-                } else {
-                    new_content
-                };
+                // Ensure trailing newline
+                if !new_lines.last().is_some_and(String::is_empty) {
+                    new_lines.push(String::new());
+                }
+                let new_content = new_lines.join("\n");
 
                 if let Some(dest) = move_to {
                     let dest_full = resolve_path(work_dir, dest);
@@ -236,86 +218,199 @@ fn apply_hunks(hunks: &[PatchHunk], work_dir: &str) -> Result<String> {
     Ok(summary.join("\n"))
 }
 
-// --- Fuzzy matching (3-level fallback like Codex) ---
+/// Compute replacements matching Codex's compute_replacements logic.
+fn compute_replacements(
+    original_lines: &[String],
+    path: &str,
+    chunks: &[UpdateChunk],
+) -> Result<Vec<(usize, usize, Vec<String>)>> {
+    let mut replacements: Vec<(usize, usize, Vec<String>)> = Vec::new();
+    let mut line_index: usize = 0;
 
-fn seek_context(lines: &[String], context: &str, start: usize) -> Result<usize> {
-    // Level 1: exact match
-    for i in start..lines.len() {
-        if lines[i] == context {
-            return Ok(i);
+    for chunk in chunks {
+        // Use context line to narrow search position
+        if let Some(ctx_line) = &chunk.context {
+            if let Some(idx) = seek_sequence(
+                original_lines,
+                &[ctx_line.clone()],
+                line_index,
+                false,
+            ) {
+                line_index = idx + 1;
+            } else {
+                bail!(
+                    "Failed to find context '{}' in {}",
+                    ctx_line,
+                    path
+                );
+            }
+        }
+
+        if chunk.old_lines.is_empty() {
+            // Pure addition — insert at end
+            let insertion_idx = if original_lines.last().is_some_and(String::is_empty) {
+                original_lines.len() - 1
+            } else {
+                original_lines.len()
+            };
+            replacements.push((insertion_idx, 0, chunk.new_lines.clone()));
+            continue;
+        }
+
+        // Try to find old_lines in the file
+        let mut pattern: &[String] = &chunk.old_lines;
+        let mut found = seek_sequence(original_lines, pattern, line_index, chunk.is_end_of_file);
+
+        let mut new_slice: &[String] = &chunk.new_lines;
+
+        // Retry without trailing empty line (Codex eof handling)
+        if found.is_none() && pattern.last().is_some_and(String::is_empty) {
+            pattern = &pattern[..pattern.len() - 1];
+            if new_slice.last().is_some_and(String::is_empty) {
+                new_slice = &new_slice[..new_slice.len() - 1];
+            }
+            found = seek_sequence(original_lines, pattern, line_index, chunk.is_end_of_file);
+        }
+
+        if let Some(start_idx) = found {
+            replacements.push((start_idx, pattern.len(), new_slice.to_vec()));
+            line_index = start_idx + pattern.len();
+        } else {
+            let preview: Vec<_> = chunk.old_lines.iter().take(3).collect();
+            bail!(
+                "Failed to find expected lines in {}:\n{:?}",
+                path,
+                preview
+            );
         }
     }
-    // Level 2: trim end
-    for i in start..lines.len() {
-        if lines[i].trim_end() == context.trim_end() {
-            return Ok(i);
-        }
-    }
-    // Level 3: trim both
-    for i in start..lines.len() {
-        if lines[i].trim() == context.trim() {
-            return Ok(i);
-        }
-    }
-    bail!(
-        "Could not find context line: '{context}' (searched from line {})",
-        start + 1
-    )
+
+    replacements.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
+    Ok(replacements)
 }
 
-fn find_old_lines(
-    file_lines: &[String],
-    old_lines: &[String],
-    start: usize,
-) -> Result<usize> {
-    if old_lines.is_empty() {
-        return Ok(start);
+/// Apply replacements in reverse order to avoid index shifting.
+fn apply_replacements(
+    mut lines: Vec<String>,
+    replacements: &[(usize, usize, Vec<String>)],
+) -> Vec<String> {
+    for (start_idx, old_len, new_segment) in replacements.iter().rev() {
+        let start_idx = *start_idx;
+        let old_len = *old_len;
+
+        // Remove old lines
+        for _ in 0..old_len {
+            if start_idx < lines.len() {
+                lines.remove(start_idx);
+            }
+        }
+
+        // Insert new lines
+        for (offset, new_line) in new_segment.iter().enumerate() {
+            lines.insert(start_idx + offset, new_line.clone());
+        }
     }
 
-    let len = old_lines.len();
-    // Level 1: exact
-    for i in start..=file_lines.len().saturating_sub(len) {
-        if file_lines[i..i + len]
-            .iter()
-            .zip(old_lines)
-            .all(|(a, b)| a == b)
-        {
-            return Ok(i);
+    lines
+}
+
+// --- seek_sequence: 4-level fuzzy matching (matches Codex) ---
+
+/// Find `pattern` lines within `lines` starting at or after `start`.
+/// When `eof` is true, first tries matching from end-of-file.
+/// 4 levels: exact → trim_end → trim → Unicode normalization.
+fn seek_sequence(
+    lines: &[String],
+    pattern: &[String],
+    start: usize,
+    eof: bool,
+) -> Option<usize> {
+    if pattern.is_empty() {
+        return Some(start);
+    }
+    if pattern.len() > lines.len() {
+        return None;
+    }
+
+    let search_start = if eof && lines.len() >= pattern.len() {
+        lines.len() - pattern.len()
+    } else {
+        start
+    };
+
+    // Level 1: exact match
+    for i in search_start..=lines.len().saturating_sub(pattern.len()) {
+        if lines[i..i + pattern.len()] == *pattern {
+            return Some(i);
         }
     }
     // Level 2: trim end
-    for i in start..=file_lines.len().saturating_sub(len) {
-        if file_lines[i..i + len]
-            .iter()
-            .zip(old_lines)
-            .all(|(a, b)| a.trim_end() == b.trim_end())
-        {
-            return Ok(i);
+    for i in search_start..=lines.len().saturating_sub(pattern.len()) {
+        let mut ok = true;
+        for (p_idx, pat) in pattern.iter().enumerate() {
+            if lines[i + p_idx].trim_end() != pat.trim_end() {
+                ok = false;
+                break;
+            }
+        }
+        if ok {
+            return Some(i);
         }
     }
     // Level 3: trim both
-    for i in start..=file_lines.len().saturating_sub(len) {
-        if file_lines[i..i + len]
-            .iter()
-            .zip(old_lines)
-            .all(|(a, b)| a.trim() == b.trim())
-        {
-            return Ok(i);
+    for i in search_start..=lines.len().saturating_sub(pattern.len()) {
+        let mut ok = true;
+        for (p_idx, pat) in pattern.iter().enumerate() {
+            if lines[i + p_idx].trim() != pat.trim() {
+                ok = false;
+                break;
+            }
+        }
+        if ok {
+            return Some(i);
+        }
+    }
+    // Level 4: Unicode normalization (dashes, quotes, spaces)
+    fn normalise(s: &str) -> String {
+        s.trim()
+            .chars()
+            .map(|c| match c {
+                // Various dash / hyphen code-points → ASCII '-'
+                '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2015}'
+                | '\u{2212}' => '-',
+                // Fancy single quotes → '\''
+                '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' => '\'',
+                // Fancy double quotes → '"'
+                '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' => '"',
+                // Non-breaking space and other odd spaces → normal space
+                '\u{00A0}' | '\u{2002}' | '\u{2003}' | '\u{2004}' | '\u{2005}' | '\u{2006}'
+                | '\u{2007}' | '\u{2008}' | '\u{2009}' | '\u{200A}' | '\u{202F}' | '\u{205F}'
+                | '\u{3000}' => ' ',
+                other => other,
+            })
+            .collect::<String>()
+    }
+
+    for i in search_start..=lines.len().saturating_sub(pattern.len()) {
+        let mut ok = true;
+        for (p_idx, pat) in pattern.iter().enumerate() {
+            if normalise(&lines[i + p_idx]) != normalise(pat) {
+                ok = false;
+                break;
+            }
+        }
+        if ok {
+            return Some(i);
         }
     }
 
-    let preview: Vec<_> = old_lines.iter().take(3).collect();
-    bail!(
-        "Could not match old lines starting from line {}: {:?}",
-        start + 1,
-        preview
-    )
+    None
 }
 
 fn resolve_path(work_dir: &str, path: &str) -> String {
     if Path::new(path).is_absolute() {
         path.to_string()
     } else {
-        format!("{work_dir}/{path}")
+        Path::new(work_dir).join(path).to_string_lossy().to_string()
     }
 }
