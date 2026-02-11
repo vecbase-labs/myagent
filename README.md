@@ -60,4 +60,4 @@ MYAGENT_API_KEY=sk-xxx myagent -p "hello"
 
 ## License
 
-MIT
+Apache-2.0
