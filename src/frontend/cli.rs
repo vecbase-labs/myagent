@@ -6,6 +6,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use crate::protocol::{AgentEvent, AgentStatus, ContentBlock, Submission};
 use crate::thread_manager::ThreadManager;
 
+use crate::update_check::CURRENT_VERSION;
+
 use super::Frontend;
 
 pub struct CliFrontend {
@@ -13,6 +15,8 @@ pub struct CliFrontend {
     pub prompt: Option<String>,
     /// Which agent type to use.
     pub agent_type: String,
+    /// If Some, a newer version is available.
+    pub update_hint: Option<String>,
 }
 
 #[async_trait::async_trait]
@@ -21,7 +25,7 @@ impl Frontend for CliFrontend {
         if let Some(prompt) = &self.prompt {
             run_oneshot(&manager, &self.agent_type, prompt).await
         } else {
-            run_interactive(&manager, &self.agent_type).await
+            run_interactive(&manager, &self.agent_type, self.update_hint.as_deref()).await
         }
     }
 }
@@ -75,12 +79,21 @@ async fn run_oneshot(
     Ok(())
 }
 
-async fn run_interactive(manager: &ThreadManager, agent_type: &str) -> Result<()> {
+async fn run_interactive(
+    manager: &ThreadManager,
+    agent_type: &str,
+    update_hint: Option<&str>,
+) -> Result<()> {
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
 
-    eprintln!("myagent interactive mode (type 'exit' to quit)");
+    eprintln!("myagent v{CURRENT_VERSION} (type 'exit' to quit)");
     eprintln!("Agent: {agent_type}");
+    if let Some(latest) = update_hint {
+        eprintln!(
+            "\n  Update available: {CURRENT_VERSION} -> {latest}. Run `myagent update` to upgrade."
+        );
+    }
     eprintln!();
 
     let (_thread_id, thread) = manager.create_thread(agent_type).await?;

@@ -320,13 +320,38 @@ fn parse_event_json(json: &Value) -> Option<TransportEvent> {
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
 
-    if msg_type != "text" {
-        debug!("Ignoring non-text message type: {msg_type}");
+    if msg_type != "text" && msg_type != "file" {
+        debug!("Ignoring unsupported message type: {msg_type}");
         return None;
     }
 
     let content_str = message.get("content")?.as_str()?;
     let content: Value = serde_json::from_str(content_str).ok()?;
+
+    // Handle file messages
+    if msg_type == "file" {
+        let file_key = content.get("file_key")?.as_str()?.to_string();
+        let file_name = content
+            .get("file_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&file_key)
+            .to_string();
+        let message_id = message.get("message_id")?.as_str()?.to_string();
+        let parent_id = message
+            .get("parent_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        info!("File message in chat_id={chat_id}: {file_name} (msg_id={message_id})");
+        return Some(TransportEvent::FileMessage {
+            conv_id: chat_id.to_string(),
+            user_id: sender_id.to_string(),
+            message_id,
+            file_key,
+            file_name,
+            parent_id,
+        });
+    }
+
     let text = content.get("text")?.as_str()?.to_string();
 
     let parent_id = message

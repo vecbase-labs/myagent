@@ -155,6 +155,15 @@ pub fn daemonize() -> Result<()> {
     Ok(())
 }
 
+/// Check if the daemon is currently running.
+pub fn is_daemon_running() -> bool {
+    if let Some(pid) = read_pid() {
+        is_running(pid)
+    } else {
+        false
+    }
+}
+
 /// Load port from config file, or use default.
 fn load_port() -> u16 {
     let path = config::default_config_path();

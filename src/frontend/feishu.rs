@@ -26,7 +26,7 @@ struct ThreadRenderState {
 
 impl ThreadRenderState {
     fn title(&self) -> String {
-        format!("MyAgent · {} #{}", self.agent_name, self.thread_id.0)
+        format!("Task #{} · {}", self.thread_id.0, self.agent_name)
     }
 }
 
@@ -87,6 +87,9 @@ impl Frontend for FeishuFrontend {
                         ("myagent", text)
                     };
 
+                    // Prepend chat context so the agent knows the chat_id for file operations
+                    let prompt_with_ctx = format!("<feishu_context chat_id=\"{conv_id}\" />\n{prompt}");
+
                     let (thread_id, thread) = match manager.create_thread(agent_type).await {
                         Ok(v) => v,
                         Err(e) => {
@@ -97,13 +100,13 @@ impl Frontend for FeishuFrontend {
 
                     info!("[{thread_id}] New task: user={user_id}, agent={agent_type}");
 
-                    if let Err(e) = thread.submit(Submission::UserMessage(prompt)).await {
+                    if let Err(e) = thread.submit(Submission::UserMessage(prompt_with_ctx)).await {
                         error!("[{thread_id}] Failed to submit: {e}");
                         continue;
                     }
 
                     let agent_name = thread.agent_name.clone();
-                    let title = format!("MyAgent · {agent_name} #{}", thread_id.0);
+                    let title = format!("Task #{} · {agent_name}", thread_id.0);
                     render_states.insert(
                         thread_id.clone(),
                         ThreadRenderState {
@@ -142,13 +145,13 @@ impl Frontend for FeishuFrontend {
 
                 FeishuInternalEvent::ReplyMessage { card_msg_id, text } => {
                     if let Some(tid) = card_to_thread.get(&card_msg_id).cloned() {
+                        // Reply to an existing agent card → follow-up
                         if let Some(thread) = manager.get_thread(&tid).await {
                             info!("[{tid}] Routing reply");
                             let _ = thread.submit(Submission::FollowUp(text)).await;
                         }
                     } else {
-                        warn!("Reply to unknown card: {card_msg_id}");
-                        // Session no longer exists (e.g. after restart) — notify user
+                        warn!("Reply to unknown message: {card_msg_id}");
                         let t = transport.clone();
                         let mid = card_msg_id.clone();
                         tokio::spawn(async move {
@@ -226,6 +229,24 @@ async fn start_feishu_listener(
                     card_msg_id,
                     text,
                 } => FeishuInternalEvent::ReplyMessage { card_msg_id, text },
+                crate::transport::feishu::TransportEvent::FileMessage {
+                    conv_id: _,
+                    user_id: _,
+                    message_id: _,
+                    file_key: _,
+                    file_name,
+                    parent_id,
+                } => {
+                    if let Some(card_msg_id) = parent_id {
+                        // File reply to an existing card → route as follow-up
+                        let text = format!("User sent a file: {file_name}");
+                        FeishuInternalEvent::ReplyMessage { card_msg_id, text }
+                    } else {
+                        // Direct file message → ignore (agent can find via `feishu files`)
+                        info!("Ignoring direct file message: {file_name}");
+                        continue;
+                    }
+                },
             };
             let _ = fe_tx.send(fe_event).await;
         }

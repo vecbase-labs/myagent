@@ -1,7 +1,9 @@
 mod agent;
 mod ai;
 mod cmd_config;
+mod cmd_feishu;
 mod cmd_init;
+mod cmd_update;
 mod config;
 mod daemon;
 mod frontend;
@@ -11,6 +13,7 @@ mod thread;
 mod thread_manager;
 mod tools;
 mod transport;
+mod update_check;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -55,6 +58,13 @@ enum Commands {
     Serve,
     /// Interactive setup wizard
     Init,
+    /// Update myagent to the latest version
+    Update,
+    /// Feishu file operations (upload/download)
+    Feishu {
+        #[command(subcommand)]
+        action: cmd_feishu::FeishuAction,
+    },
     /// Manage configuration
     Config {
         #[command(subcommand)]
@@ -93,6 +103,8 @@ async fn main() -> Result<()> {
             return daemon::daemonize();
         }
         Some(Commands::Init) => return cmd_init::run(),
+        Some(Commands::Update) => return cmd_update::run().await,
+        Some(Commands::Feishu { action }) => return cmd_feishu::run(action).await,
         Some(Commands::Config { action }) => {
             let path = cli.config.unwrap_or_else(config::default_config_path);
             return cmd_config::run(action, &path);
@@ -140,6 +152,9 @@ async fn main() -> Result<()> {
     };
     info!("Config loaded");
 
+    // Background update check (non-blocking, only in release builds)
+    let update_hint = update_check::check_on_startup();
+
     // Resolve workspace: serve uses config value, CLI uses pwd
     let workspace = if is_serve {
         config.resolve_workspace()
@@ -185,6 +200,7 @@ async fn main() -> Result<()> {
         let fe = frontend::cli::CliFrontend {
             prompt: cli.prompt,
             agent_type,
+            update_hint,
         };
         Box::new(fe).run(manager).await
     }

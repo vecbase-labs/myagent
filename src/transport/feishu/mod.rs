@@ -24,6 +24,15 @@ pub enum TransportEvent {
         card_msg_id: String,
         text: String,
     },
+    FileMessage {
+        conv_id: String,
+        user_id: String,
+        message_id: String,
+        file_key: String,
+        file_name: String,
+        /// If this file is a reply to an existing card
+        parent_id: Option<String>,
+    },
 }
 
 pub struct FeishuTransport {
@@ -181,6 +190,13 @@ impl FeishuTransport {
     pub async fn reply_text(&self, msg_id: &str, text: &str) -> Result<()> {
         let content = serde_json::json!({ "text": text });
         self.api.reply_message(msg_id, "text", &content).await?;
+        Ok(())
+    }
+
+    /// Download a file by file_key and save to disk. Returns the saved path.
+    pub async fn download_file_to(&self, file_key: &str, save_path: &str) -> Result<()> {
+        let bytes = self.api.download_file(file_key).await?;
+        tokio::fs::write(save_path, &bytes).await?;
         Ok(())
     }
 }

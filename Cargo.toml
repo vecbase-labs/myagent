@@ -1,11 +1,11 @@
 [package]
 name = "myagent"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "multipart"] }
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 eventsource-stream = "0.2"
@@ -33,3 +33,7 @@ dirs = "6"
 ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
 axum = "0.8.8"
+self-replace = "1"
+flate2 = "1"
+tar = "0.4"
+zip = "2"

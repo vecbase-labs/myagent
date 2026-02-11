@@ -39,6 +39,7 @@ impl ThreadManager {
             _ => Box::new(crate::agent::ai::AiAgent::new(
                 self.config.myagent_env(),
                 self.workspace.clone(),
+                self.config.feishu_config().is_some(),
             )),
         };
 
@@ -64,5 +65,9 @@ impl ThreadManager {
 
     pub fn config(&self) -> &AppConfig {
         &self.config
+    }
+
+    pub fn workspace(&self) -> &str {
+        &self.workspace
     }
 }

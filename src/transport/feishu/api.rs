@@ -1,5 +1,6 @@
 use anyhow::Result;
 use reqwest::Client;
+use reqwest::multipart;
 use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
@@ -238,6 +239,203 @@ impl FeishuApi {
             anyhow::bail!("Failed to update message: {}", resp["msg"]);
         }
         Ok(msg_id.to_string())
+    }
+
+    // ── File APIs ──
+
+    /// Upload a local file to Feishu. Returns the file_key.
+    pub async fn upload_file(&self, file_path: &str, file_type: &str) -> Result<String> {
+        let path = std::path::Path::new(file_path);
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file")
+            .to_string();
+
+        let bytes = tokio::fs::read(path).await?;
+        let file_part = multipart::Part::bytes(bytes)
+            .file_name(file_name.clone())
+            .mime_str("application/octet-stream")?;
+
+        let form = multipart::Form::new()
+            .text("file_type", file_type.to_string())
+            .text("file_name", file_name)
+            .part("file", file_part);
+
+        let token = self.get_token().await?;
+        let url = format!("{BASE_URL}/im/v1/files");
+
+        let resp: Value = self
+            .http
+            .post(&url)
+            .bearer_auth(&token)
+            .multipart(form)
+            .send()
+            .await?
+            .json()
+            .await?;
+
+        let code = resp["code"].as_i64().unwrap_or(-1);
+        if Self::is_token_error(code) {
+            warn!("Token expired on upload_file, refreshing...");
+            let new_token = self.invalidate_and_refresh().await?;
+            // Rebuild form (consumed by previous request)
+            let bytes = tokio::fs::read(path).await?;
+            let file_name2 = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("file")
+                .to_string();
+            let file_part = multipart::Part::bytes(bytes)
+                .file_name(file_name2.clone())
+                .mime_str("application/octet-stream")?;
+            let form = multipart::Form::new()
+                .text("file_type", file_type.to_string())
+                .text("file_name", file_name2)
+                .part("file", file_part);
+
+            let resp: Value = self
+                .http
+                .post(&url)
+                .bearer_auth(&new_token)
+                .multipart(form)
+                .send()
+                .await?
+                .json()
+                .await?;
+            let code = resp["code"].as_i64().unwrap_or(-1);
+            if code != 0 {
+                anyhow::bail!("Failed to upload file: {} (code={code})", resp["msg"]);
+            }
+            return Ok(resp["data"]["file_key"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string());
+        }
+
+        if code != 0 {
+            anyhow::bail!("Failed to upload file: {} (code={code})", resp["msg"]);
+        }
+        let file_key = resp["data"]["file_key"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        debug!("Uploaded file: {file_key}");
+        Ok(file_key)
+    }
+
+    /// Download a file by file_key. Returns the raw bytes.
+    /// Use this for files uploaded by the bot itself.
+    pub async fn download_file(&self, file_key: &str) -> Result<Vec<u8>> {
+        let token = self.get_token().await?;
+        let url = format!("{BASE_URL}/im/v1/files/{file_key}");
+        self.download_url(&url, &token).await
+    }
+
+    /// Download a resource from a user-sent message.
+    /// This is for files/images sent by users in chat.
+    pub async fn download_message_resource(
+        &self,
+        message_id: &str,
+        file_key: &str,
+        resource_type: &str,
+    ) -> Result<Vec<u8>> {
+        let token = self.get_token().await?;
+        let url = format!(
+            "{BASE_URL}/im/v1/messages/{message_id}/resources/{file_key}?type={resource_type}"
+        );
+        self.download_url(&url, &token).await
+    }
+
+    async fn download_url(&self, url: &str, token: &str) -> Result<Vec<u8>> {
+        let resp = self.http.get(url).bearer_auth(token).send().await?;
+
+        if resp.status() == 401 {
+            warn!("Token expired on download, refreshing...");
+            let new_token = self.invalidate_and_refresh().await?;
+            let resp = self
+                .http
+                .get(url)
+                .bearer_auth(&new_token)
+                .send()
+                .await?
+                .error_for_status()?;
+            return Ok(resp.bytes().await?.to_vec());
+        }
+
+        let resp = resp.error_for_status()?;
+        Ok(resp.bytes().await?.to_vec())
+    }
+
+    /// List messages in a chat. Returns (items, has_more, next_page_token).
+    /// Each item is a raw serde_json::Value from the Feishu API.
+    pub async fn list_messages(
+        &self,
+        chat_id: &str,
+        page_size: usize,
+        page_token: Option<&str>,
+    ) -> Result<(Vec<Value>, bool, Option<String>)> {
+        let token = self.get_token().await?;
+        let mut url = format!(
+            "{BASE_URL}/im/v1/messages?container_id_type=chat&container_id={chat_id}&page_size={page_size}&sort_type=ByCreateTimeDesc"
+        );
+        if let Some(pt) = page_token {
+            url.push_str(&format!("&page_token={pt}"));
+        }
+
+        let resp: Value = self
+            .http
+            .get(&url)
+            .bearer_auth(&token)
+            .send()
+            .await?
+            .json()
+            .await?;
+
+        let code = resp["code"].as_i64().unwrap_or(-1);
+        if Self::is_token_error(code) {
+            let new_token = self.invalidate_and_refresh().await?;
+            let resp: Value = self
+                .http
+                .get(&url)
+                .bearer_auth(&new_token)
+                .send()
+                .await?
+                .json()
+                .await?;
+            let code = resp["code"].as_i64().unwrap_or(-1);
+            if code != 0 {
+                anyhow::bail!("list_messages failed: {} (code={code})", resp["msg"]);
+            }
+            return Self::parse_list_response(&resp);
+        }
+
+        if code != 0 {
+            anyhow::bail!("list_messages failed: {} (code={code})", resp["msg"]);
+        }
+        Self::parse_list_response(&resp)
+    }
+
+    fn parse_list_response(resp: &Value) -> Result<(Vec<Value>, bool, Option<String>)> {
+        let items = resp["data"]["items"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let has_more = resp["data"]["has_more"].as_bool().unwrap_or(false);
+        let page_token = resp["data"]["page_token"]
+            .as_str()
+            .map(|s| s.to_string());
+        Ok((items, has_more, page_token))
+    }
+
+    /// Send a file message to a chat using an already-uploaded file_key.
+    pub async fn send_file_message(
+        &self,
+        chat_id: &str,
+        file_key: &str,
+    ) -> Result<String> {
+        let content = serde_json::json!({ "file_key": file_key });
+        self.send_message(chat_id, "file", &content).await
     }
 
     // ── CardKit APIs ──
