@@ -1,8 +1,8 @@
-use std::io::{self, stdout};
+use std::io::stdout;
 
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind},
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
@@ -378,6 +378,18 @@ impl InitApp {
         }
     }
 
+    fn handle_paste(&mut self, text: String) {
+        if let Some(f) = self.current_field_mut() {
+            // Strip newlines/carriage returns from pasted text
+            let clean = text.replace(['\n', '\r'], "");
+            match &mut f.kind {
+                FieldKind::Text { value, .. } => value.push_str(&clean),
+                FieldKind::Password { value } => value.push_str(&clean),
+                _ => {}
+            }
+        }
+    }
+
     fn build_config(&self) -> serde_json::Value {
         let workspace = self.get_text(0, 0);
         let api_key = self.get_text(1, 0);
@@ -723,6 +735,7 @@ pub fn run() -> Result<()> {
 
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
+    stdout().execute(EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
 
@@ -738,13 +751,18 @@ pub fn run() -> Result<()> {
             break;
         }
 
-        if let Event::Key(key) = event::read()? {
-            if key.kind == KeyEventKind::Press {
+        match event::read()? {
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
                 app.handle_key(key.code);
             }
+            Event::Paste(text) => {
+                app.handle_paste(text);
+            }
+            _ => {}
         }
     }
 
+    let _ = stdout().execute(DisableBracketedPaste);
     disable_raw_mode()?;
     stdout().execute(LeaveAlternateScreen)?;
 
